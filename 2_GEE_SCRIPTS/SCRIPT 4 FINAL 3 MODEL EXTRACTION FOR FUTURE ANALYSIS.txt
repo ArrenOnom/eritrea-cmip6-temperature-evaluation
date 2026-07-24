@@ -1,0 +1,126 @@
+/**
+ * CMIP6 CORE ENSEMBLE EXTRACTION (HISTORICAL & FUTURE TIME WINDOWS)
+ * Models: NESM3, KACE-1-0-G, MPI-ESM1-2-HR
+ * Scenarios: historical, ssp245, ssp585
+ * Time Windows: Historical (1985-2014), Near-Term (2026-2050), Mid-Term (2051-2075), Long-Term (2076-2100)
+ */
+
+// ==============================================================================
+// 1. BOUNDARIES & CORE MODEL CONFIGURATION
+// ==============================================================================
+var aez_shapes = ee.FeatureCollection("projects/disaster-management-474719/assets/SELECTED_ZONES_WGS1984");
+var overall_shape = ee.Feature(aez_shapes.geometry(), {AGRO_ZONE: 'OVERALL'});
+var all_regions = aez_shapes.merge(ee.FeatureCollection([overall_shape]));
+
+var coreModels = ['NESM3', 'KACE-1-0-G', 'MPI-ESM1-2-HR'];
+
+var getZoneName = function(feature) {
+  var zone = feature.get('AGRO_ZONE');
+  return ee.Algorithms.If(zone, zone, 'ZONE');
+};
+
+var cmip6Raw = ee.ImageCollection("NASA/GDDP-CMIP6")
+  .filter(ee.Filter.inList('model', coreModels));
+
+// Helper function to extract monthly data for a specific scenario & year range
+var extractMonthlyData = function(scenarioName, startYr, endYr, labelPeriod) {
+  var yearsList = ee.List.sequence(startYr, endYr);
+  var monthsList = ee.List.sequence(1, 12);
+
+  var comboList = ee.List(coreModels).map(function(m) {
+    return yearsList.map(function(y) {
+      return monthsList.map(function(mo) {
+        return ee.Dictionary({'model': m, 'year': y, 'month': mo});
+      });
+    });
+  }).flatten();
+
+  var monthlyImages = ee.ImageCollection(comboList.map(function(dict) {
+    var d = ee.Dictionary(dict);
+    var m = d.get('model');
+    var y = d.get('year');
+    var mo = d.get('month');
+
+    var filtered = cmip6Raw
+      .filter(ee.Filter.eq('model', m))
+      .filter(ee.Filter.eq('scenario', scenarioName))
+      .filter(ee.Filter.eq('year', y))
+      .filter(ee.Filter.eq('month', mo));
+
+    var tmean = filtered.select('tas').mean().subtract(273.15).rename('Tmean');
+    var tmax  = filtered.select('tasmax').mean().subtract(273.15).rename('Tmax');
+    var tmin  = filtered.select('tasmin').mean().subtract(273.15).rename('Tmin');
+
+    var moStr = ee.String(ee.Algorithms.If(ee.Number(mo).lt(10), ee.String('0').cat(ee.Number(mo).format('%d')), ee.Number(mo).format('%d')));
+    var dateStr = ee.String(ee.Number(y).format('%d')).cat('-').cat(moStr);
+
+    return tmean.addBands([tmin, tmax])
+      .set('Model', m)
+      .set('Scenario', scenarioName.toUpperCase())
+      .set('Period', labelPeriod)
+      .set('Date', dateStr);
+  }));
+
+  return monthlyImages.map(function(img) {
+    return all_regions.map(function(feature) {
+      var meanVals = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: feature.geometry(),
+        scale: 27830,
+        maxPixels: 1e9
+      });
+
+      return ee.Feature(null, {
+        'Date': img.get('Date'),
+        'Period': img.get('Period'),
+        'Model': img.get('Model'),
+        'Scenario': img.get('Scenario'),
+        'AGRO_ZONE': getZoneName(feature),
+        'Tmean': meanVals.get('Tmean'),
+        'Tmin': meanVals.get('Tmin'),
+        'Tmax': meanVals.get('Tmax')
+      });
+    });
+  }).flatten();
+};
+
+// ==============================================================================
+// 2. EXTRACTION EXECUTION
+// ==============================================================================
+
+// A. HISTORICAL BASELINE (1985-2014)
+var historicalResults = extractMonthlyData('historical', 1985, 2014, 'HISTORICAL');
+
+// B. FUTURE PERIODS (SSP245 & SSP585)
+var nearFuture245 = extractMonthlyData('ssp245', 2026, 2050, 'NEAR_TERM_2026_2050');
+var midFuture245  = extractMonthlyData('ssp245', 2051, 2075, 'MID_TERM_2051_2075');
+var longFuture245 = extractMonthlyData('ssp245', 2076, 2100, 'LONG_TERM_2076_2100');
+
+var nearFuture585 = extractMonthlyData('ssp585', 2026, 2050, 'NEAR_TERM_2026_2050');
+var midFuture585  = extractMonthlyData('ssp585', 2051, 2075, 'MID_TERM_2051_2075');
+var longFuture585 = extractMonthlyData('ssp585', 2076, 2100, 'LONG_TERM_2076_2100');
+
+// Merge future collections
+var futureResults = ee.FeatureCollection(
+  nearFuture245.merge(midFuture245).merge(longFuture245)
+  .merge(nearFuture585).merge(midFuture585).merge(longFuture585)
+);
+
+// ==============================================================================
+// 3. EXPORT TO GOOGLE DRIVE
+// ==============================================================================
+Export.table.toDrive({
+  collection: historicalResults,
+  description: 'CMIP6_Core3_Historical_1985_2014_Monthly_Temperatures',
+  fileFormat: 'CSV',
+  selectors: ['Date', 'Period', 'Model', 'Scenario', 'AGRO_ZONE', 'Tmean', 'Tmin', 'Tmax']
+});
+
+Export.table.toDrive({
+  collection: futureResults,
+  description: 'CMIP6_Core3_Future_2026_2100_Monthly_Temperatures',
+  fileFormat: 'CSV',
+  selectors: ['Date', 'Period', 'Model', 'Scenario', 'AGRO_ZONE', 'Tmean', 'Tmin', 'Tmax']
+});
+
+print("✔ Core 3 Model Extraction script ready! Run tasks in the Tasks tab.");

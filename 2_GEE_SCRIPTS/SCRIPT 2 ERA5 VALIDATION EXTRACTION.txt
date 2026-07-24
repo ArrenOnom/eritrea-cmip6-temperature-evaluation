@@ -1,0 +1,95 @@
+// =========================================================================
+// GEE SCRIPT: Point-Based ERA5 Extraction for Station Validation (2012-2023)
+// Stations: Bisha (Moist Lowland), Halhale (Moist Highlands), Kirmud (Arid Lowlands)
+// =========================================================================
+
+// 1. Define Station Coordinates
+var stations = [
+  {
+    name: 'Bisha',
+    aez: 'Moist Lowland',
+    lat: 15.4833,
+    lon: 37.45
+  },
+  {
+    name: 'Halhale',
+    aez: 'Moist Highlands',
+    lat: 15.0600,
+    lon: 38.50
+  },
+  {
+    name: 'Kirmud',
+    aez: 'Arid Lowlands',
+    lat: 15.6979,
+    lon: 36.9804
+  }
+];
+
+// 2. Set Analysis Period (2012-2023)
+var startYear = 2012;
+var endYear = 2023;
+
+// 3. Load ERA5 Monthly Dataset and Convert K to °C
+var era5Monthly = ee.ImageCollection("ECMWF/ERA5/MONTHLY")
+  .filterDate(startYear + '-01-01', (endYear + 1) + '-01-01')
+  .map(function(img) {
+    var date = img.date().format('YYYY-MM');
+    var year = img.date().get('year');
+    var month = img.date().get('month');
+    
+    // Convert temperature from Kelvin to Celsius
+    var tmean = img.select('mean_2m_air_temperature').subtract(273.15).rename('ERA5_Tmean');
+    var tmin  = img.select('minimum_2m_air_temperature').subtract(273.15).rename('ERA5_Tmin');
+    var tmax  = img.select('maximum_2m_air_temperature').subtract(273.15).rename('ERA5_Tmax');
+    
+    return img.addBands([tmean, tmin, tmax], null, true)
+              .select(['ERA5_Tmean', 'ERA5_Tmin', 'ERA5_Tmax'])
+              .set({
+                'date': date,
+                'Year': year,
+                'Month': month
+              });
+  });
+
+// 4. Iterate over each Station and Export CSV
+stations.forEach(function(stn) {
+  
+  // Create Point Geometry for the station
+  var point = ee.Geometry.Point([stn.lon, stn.lat]);
+  
+  // Display point on map
+  Map.addLayer(point, {color: 'blue'}, stn.name + ' Station');
+  
+  // Sample ERA5 monthly images at station location
+  var sampledData = era5Monthly.map(function(img) {
+    var stats = img.reduceRegion({
+      reducer: ee.Reducer.first(),
+      geometry: point,
+      scale: 27830, // ERA5 native resolution
+      crs: 'EPSG:4326'
+    });
+    
+    return ee.Feature(null, {
+      'Station': stn.name,
+      'AEZ': stn.aez,
+      'Lat': stn.lat,
+      'Lon': stn.lon,
+      'Year': img.get('Year'),
+      'Month': img.get('Month'),
+      'date': img.get('date'),
+      'ERA5_Tmean': stats.get('ERA5_Tmean'),
+      'ERA5_Tmin': stats.get('ERA5_Tmin'),
+      'ERA5_Tmax': stats.get('ERA5_Tmax')
+    });
+  });
+  
+  // Export CSV file to Google Drive
+  Export.table.toDrive({
+    collection: sampledData,
+    description: 'ERA5_Validation_' + stn.name + '_2012_2023',
+    fileFormat: 'CSV',
+    selectors: ['Station', 'AEZ', 'Lat', 'Lon', 'Year', 'Month', 'date', 'ERA5_Tmean', 'ERA5_Tmin', 'ERA5_Tmax']
+  });
+});
+
+Map.setCenter(37.5, 15.3, 8);

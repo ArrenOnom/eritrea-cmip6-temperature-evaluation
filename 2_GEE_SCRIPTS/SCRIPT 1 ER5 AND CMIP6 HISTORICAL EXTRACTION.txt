@@ -1,0 +1,138 @@
+// =========================================================================
+// GEE SCRIPT: ERA5 vs CMIP6 (1981-2014) Monthly Temperature Extraction
+// Study Area Asset: projects/disaster-management-474719/assets/SELECTED_ZONES_WGS1984
+// Variables: Tmin, Tmean, Tmax (°C)
+// =========================================================================
+
+// 1. Load AEZ Polygons & Configuration Parameters
+var aez = ee.FeatureCollection("projects/disaster-management-474719/assets/SELECTED_ZONES_WGS1984");
+var startYear = 1981;
+var endYear = 2014;
+var spatialScale = 27830; // Native 0.25° grid size for ERA5 and NEX-GDDP-CMIP6
+
+var years = ee.List.sequence(startYear, endYear);
+var months = ee.List.sequence(1, 12);
+
+// Center Map view on study area
+Map.centerObject(aez, 7);
+Map.addLayer(aez, {color: 'red'}, 'AEZ Boundaries');
+
+// =========================================================================
+// 2. PROCESS ERA5 REANALYSIS (1981 - 2014)
+// =========================================================================
+var era5Monthly = ee.ImageCollection("ECMWF/ERA5/MONTHLY")
+  .filterDate(startYear + '-01-01', (endYear + 1) + '-01-01')
+  .filterBounds(aez)
+  .map(function(img) {
+    var tmean = img.select('mean_2m_air_temperature').subtract(273.15).rename('Tmean');
+    var tmin  = img.select('minimum_2m_air_temperature').subtract(273.15).rename('Tmin');
+    var tmax  = img.select('maximum_2m_air_temperature').subtract(273.15).rename('Tmax');
+    
+    return img.addBands([tmean, tmin, tmax], null, true)
+              .select(['Tmean', 'Tmin', 'Tmax'])
+              .copyProperties(img, ['system:time_start']);
+  });
+
+// Extract Spatial Zonal Statistics for ERA5
+var era5Zonal = era5Monthly.map(function(img) {
+  var date = img.date().format('YYYY-MM');
+  return img.reduceRegions({
+    collection: aez,
+    reducer: ee.Reducer.mean(),
+    scale: spatialScale,
+    crs: 'EPSG:4326'
+  }).map(function(feat) {
+    return feat.set({
+      'date': date,
+      'dataset': 'ERA5',
+      'model': 'ERA5_Reanalysis'
+    });
+  });
+}).flatten();
+
+// Clean ERA5 export collection (Remove unnecessary geometry for CSV export)
+var era5ExportTable = era5Zonal.map(function(f) {
+  return f.setGeometry(null);
+});
+
+Export.table.toDrive({
+  collection: era5ExportTable,
+  description: 'ERA5_Temperature_Monthly_1981_2014',
+  fileFormat: 'CSV',
+  selectors: ['AGRO_ZONE', 'date', 'dataset', 'model', 'Tmean', 'Tmin', 'Tmax']
+});
+
+// =========================================================================
+// 3. PROCESS 34 NEX-GDDP-CMIP6 MODELS (HISTORICAL 1981 - 2014)
+// =========================================================================
+
+// List of all 34 CMIP6 GCM models in the NEX-GDDP collection
+var models = [
+  'ACCESS-CM2', 'ACCESS-ESM1-5', 'BCC-CSM2-MR', 'CanESM5', 'CESM2', 
+  'CESM2-WACCM', 'CMCC-CM2-SR5', 'CMCC-ESM2', 'CNRM-CM6-1', 'CNRM-ESM2-1', 
+  'E3SM-1-0', 'EC-Earth3', 'EC-Earth3-Veg', 'EC-Earth3-Veg-LR', 'FGOALS-g3', 
+  'GFDL-CM4', 'GFDL-ESM4', 'GISS-E2-1-G', 'HadGEM3-GC31-LL', 'HadGEM3-GC31-MM', 
+  'IITM-ESM', 'INM-CM4-8', 'INM-CM5-0', 'IPSL-CM6A-LR', 'KACE-1-0-G', 
+  'KIOST-ESM', 'MIROC-ES2L', 'MIROC6', 'MPI-ESM1-2-HR', 'MPI-ESM1-2-LR', 
+  'MRI-ESM2-0', 'NESM3', 'NorESM2-LM', 'NorESM2-MM', 'TaiESM1', 'UKESM1-0-LL'
+];
+
+// Loop through each CMIP6 model and export separate CSVs
+models.forEach(function(modelName) {
+  var cmip6Daily = ee.ImageCollection("NASA/GDDP-CMIP6")
+    .filter(ee.Filter.eq('model', modelName))
+    .filter(ee.Filter.eq('scenario', 'historical'))
+    .filterDate(startYear + '-01-01', (endYear + 1) + '-01-01')
+    .filterBounds(aez);
+
+  // Aggregate Daily to Monthly Means and convert Kelvin to Celsius
+  var cmip6Monthly = ee.ImageCollection.fromImages(
+    years.map(function(y) {
+      return months.map(function(m) {
+        var filtered = cmip6Daily
+          .filter(ee.Filter.calendarRange(y, y, 'year'))
+          .filter(ee.Filter.calendarRange(m, m, 'month'));
+          
+        var monthlyMean = filtered.select(['tas', 'tasmin', 'tasmax'])
+          .mean()
+          .subtract(273.15)
+          .rename(['Tmean', 'Tmin', 'Tmax']);
+          
+        var dateString = ee.Date.fromYMD(y, m, 1).format('YYYY-MM');
+        return monthlyMean.set({
+          'date': dateString,
+          'dataset': 'NEX-GDDP-CMIP6',
+          'model': modelName
+        });
+      });
+    }).flatten()
+  );
+
+  // Extract Spatial Zonal Statistics for the Model
+  var cmip6Zonal = cmip6Monthly.map(function(img) {
+    return img.reduceRegions({
+      collection: aez,
+      reducer: ee.Reducer.mean(),
+      scale: spatialScale,
+      crs: 'EPSG:4326'
+    }).map(function(feat) {
+      return feat.set({
+        'date': img.get('date'),
+        'dataset': img.get('dataset'),
+        'model': img.get('model')
+      });
+    });
+  }).flatten();
+
+  var cmip6ExportTable = cmip6Zonal.map(function(f) {
+    return f.setGeometry(null);
+  });
+
+  // Export CSV for each model
+  Export.table.toDrive({
+    collection: cmip6ExportTable,
+    description: 'CMIP6_' + modelName.replace(/-/g, '_') + '_Temperature_Monthly_1981_2014',
+    fileFormat: 'CSV',
+    selectors: ['AGRO_ZONE', 'date', 'dataset', 'model', 'Tmean', 'Tmin', 'Tmax']
+  });
+});

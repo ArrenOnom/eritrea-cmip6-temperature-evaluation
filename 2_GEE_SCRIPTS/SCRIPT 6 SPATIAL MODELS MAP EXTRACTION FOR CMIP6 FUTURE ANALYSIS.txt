@@ -1,0 +1,102 @@
+// ==============================================================================
+// GEE SCRIPT: EXTRACT CMIP6 HISTORICAL & FUTURE SPATIAL RASTERS FOR CORE 3
+// Correct Asset: NASA/GDDP-CMIP6
+// ==============================================================================
+
+// 1. Define Study Area & Core Models
+var roi = ee.FeatureCollection("projects/disaster-management-474719/assets/SELECTED_ZONES_WGS1984");
+var coreModels = ['NESM3', 'KACE-1-0-G', 'MPI-ESM1-2-HR'];
+
+// Correct Earth Engine Asset Path
+var cmip6Raw = ee.ImageCollection("NASA/GDDP-CMIP6")
+  .filter(ee.Filter.inList('model', coreModels));
+
+// Function to compute baseline or future mean rasters (°C)
+function getEnsembleMean(scenarioName, startYr, endYr) {
+  var filtered = cmip6Raw
+    .filter(ee.Filter.eq('scenario', scenarioName))
+    .filter(ee.Filter.gte('year', startYr))
+    .filter(ee.Filter.lte('year', endYr));
+
+  var tmean = filtered.select('tas').mean().subtract(273.15).rename('Tmean');
+  var tmax  = filtered.select('tasmax').mean().subtract(273.15).rename('Tmax');
+  var tmin  = filtered.select('tasmin').mean().subtract(273.15).rename('Tmin');
+
+  return tmean.addBands([tmin, tmax]).clip(roi);
+}
+
+// 2. Compute Ensemble Rasters
+// A. Historical Baseline (1985-2014)
+var histMME = getEnsembleMean('historical', 1985, 2014);
+
+// B. Future Scenarios (2026-2100)
+var fut245MME = getEnsembleMean('ssp245', 2026, 2100);
+var fut585MME = getEnsembleMean('ssp585', 2026, 2100);
+
+// C. Calculate Anomalies (ΔT = Future - Historical)
+var anom245MME = fut245MME.subtract(histMME);
+var anom585MME = fut585MME.subtract(histMME);
+
+// 3. Export Rasters to Google Drive
+var exportScale = 27830; // Matches your extraction resolution (~25km)
+
+var varList = ['Tmean', 'Tmin', 'Tmax'];
+
+varList.forEach(function(v) {
+  // 1. Historical Baseline Map
+  Export.image.toDrive({
+    image: histMME.select(v),
+    description: 'CMIP6_Historical_1985_2014_MME_' + v,
+    folder: 'CMIP6_Anomalies_Export',
+    scale: exportScale,
+    region: roi.geometry().bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // 2. SSP2-4.5 Future Map
+  Export.image.toDrive({
+    image: fut245MME.select(v),
+    description: 'CMIP6_SSP245_2026_2100_MME_' + v,
+    folder: 'CMIP6_Anomalies_Export',
+    scale: exportScale,
+    region: roi.geometry().bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // 3. SSP2-4.5 Anomaly Map
+  Export.image.toDrive({
+    image: anom245MME.select(v),
+    description: 'CMIP6_SSP245_Anomaly_2026_2100_' + v,
+    folder: 'CMIP6_Anomalies_Export',
+    scale: exportScale,
+    region: roi.geometry().bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // 4. SSP5-8.5 Future Map
+  Export.image.toDrive({
+    image: fut585MME.select(v),
+    description: 'CMIP6_SSP585_2026_2100_MME_' + v,
+    folder: 'CMIP6_Anomalies_Export',
+    scale: exportScale,
+    region: roi.geometry().bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+
+  // 5. SSP5-8.5 Anomaly Map
+  Export.image.toDrive({
+    image: anom585MME.select(v),
+    description: 'CMIP6_SSP585_Anomaly_2026_2100_' + v,
+    folder: 'CMIP6_Anomalies_Export',
+    scale: exportScale,
+    region: roi.geometry().bounds(),
+    fileFormat: 'GeoTIFF',
+    maxPixels: 1e13
+  });
+});
+
+print("✔ Corrected export script generated! Go to the Tasks tab and click RUN on the 15 tasks.");
