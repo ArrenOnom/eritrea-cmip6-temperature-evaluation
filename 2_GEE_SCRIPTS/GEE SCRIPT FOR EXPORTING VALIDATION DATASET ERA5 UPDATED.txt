@@ -1,0 +1,126 @@
+// =========================================================================
+// FINAL GEE SCRIPT: 12-Station ERA5-Land Monthly Mean of Daily Tmax & Tmin
+// Source: ECMWF/ERA5_LAND/DAILY_AGGR -> Calendar-Month Mean (°C)
+// Updated: Removed 2020-07-01 cap to extract each station's full observed period
+// =========================================================================
+
+// 1. STATION METADATA (Full Observed Periods)
+var stations = [
+  {name: 'Zara',      aez: 'Arid Lowland',   lat: 16.62803, lon: 37.84683, start: '2009-01-01', end: '2024-12-01'},
+  {name: 'Tesseney',  aez: 'Arid Lowland',   lat: 15.11000, lon: 36.67000, start: '1992-01-01', end: '2013-12-01'},
+  {name: 'Keren',     aez: 'Arid Lowland',   lat: 15.78000, lon: 38.45000, start: '2000-01-01', end: '2010-12-01'},
+  {name: 'Bisha',     aez: 'Arid Lowland',   lat: 15.51360, lon: 37.00280, start: '2012-01-01', end: '2024-12-01'},
+  {name: 'Kirmud',    aez: 'Arid Lowland',   lat: 15.69790, lon: 36.98040, start: '2004-01-01', end: '2023-12-01'},
+  {name: 'Afdeyu',    aez: 'Moist Highland', lat: 15.50121, lon: 38.85913, start: '1994-01-01', end: '2024-12-01'},
+  {name: 'Mendefera', aez: 'Moist Highland', lat: 14.88000, lon: 38.82000, start: '1998-01-01', end: '2005-12-01'},
+  {name: 'Asmara',    aez: 'Moist Highland', lat: 15.29000, lon: 38.90000, start: '1992-01-01', end: '2023-12-01'},
+  {name: 'Halhale',   aez: 'Moist Highland', lat: 15.06000, lon: 38.50000, start: '2003-01-01', end: '2024-12-01'},
+  {name: 'Shambuko',  aez: 'Moist Lowland',  lat: 14.91850, lon: 37.83560, start: '1995-01-01', end: '2017-12-01'},
+  {name: 'Omhajer',   aez: 'Moist Lowland',  lat: 14.33190, lon: 36.65150, start: '1993-01-01', end: '2007-12-01'},
+  {name: 'Barentu',   aez: 'Moist Lowland',  lat: 15.10580, lon: 37.59070, start: '1992-01-01', end: '2016-12-01'}
+];
+
+var driveFolder = 'ERA5_Land_Full_Station_Validation';
+
+// 2. LOAD DAILY ERA5-LAND AGGREGATES & NATIVE PROJECTION
+var dailyERA5 = ee.ImageCollection('ECMWF/ERA5_LAND/DAILY_AGGR')
+  .select(['temperature_2m_max', 'temperature_2m_min']);
+
+var nativeProj = dailyERA5.first().projection();
+
+// 3. HELPER: FIRST DAY OF THE FOLLOWING MONTH
+function nextMonthFirstDay(dateString) {
+  var parts = dateString.split('-');
+  var year = parseInt(parts[0], 10);
+  var month = parseInt(parts[1], 10);
+
+  if (month === 12) {
+    year += 1;
+    month = 1;
+  } else {
+    month += 1;
+  }
+
+  return year + '-' + (month < 10 ? '0' + month : month) + '-01';
+}
+
+// 4. PROCESS & EXPORT EACH STATION FOR ITS FULL OBSERVED RECORD
+stations.forEach(function(stn) {
+  var point = ee.Geometry.Point([stn.lon, stn.lat]);
+  Map.addLayer(point, {color: 'blue'}, stn.name);
+
+  var endExclusive = nextMonthFirstDay(stn.end);
+  var stationDaily = dailyERA5.filterDate(stn.start, endExclusive);
+
+  var startDate = ee.Date(stn.start);
+  var endDate = ee.Date(endExclusive);
+  var numberOfMonths = endDate.difference(startDate, 'month').round();
+
+  var monthlyImages = ee.ImageCollection.fromImages(
+    ee.List.sequence(0, numberOfMonths.subtract(1)).map(function(i) {
+      var monthStart = startDate.advance(i, 'month');
+      var monthEnd = monthStart.advance(1, 'month');
+
+      var dailySubset = stationDaily.filterDate(monthStart, monthEnd);
+      var nDays = dailySubset.size();
+
+      var meanImg = dailySubset.mean();
+      var tmaxC = meanImg.select('temperature_2m_max').subtract(273.15).rename('ERA5_Tmax');
+      var tminC = meanImg.select('temperature_2m_min').subtract(273.15).rename('ERA5_Tmin');
+      var tmeanC = tmaxC.add(tminC).divide(2).rename('ERA5_Tmean');
+
+      return ee.Image.cat([tmaxC, tminC, tmeanC]).set({
+        'Year': monthStart.get('year'),
+        'Month': monthStart.get('month'),
+        'date': monthStart.format('YYYY-MM'),
+        'Daily_Records': nDays,
+        'Station': stn.name,
+        'AEZ': stn.aez,
+        'system:time_start': monthStart.millis()
+      });
+    })
+  ).filter(ee.Filter.gt('Daily_Records', 0));
+
+  var sampledData = monthlyImages.map(function(img) {
+    var stats = img.reduceRegion({
+      reducer: ee.Reducer.first(),
+      geometry: point,
+      crs: nativeProj,
+      scale: 11132,
+      maxPixels: 100000
+    });
+
+    return ee.Feature(null, {
+      'Station': stn.name,
+      'AEZ': stn.aez,
+      'Lat': stn.lat,
+      'Lon': stn.lon,
+      'Year': img.get('Year'),
+      'Month': img.get('Month'),
+      'date': img.get('date'),
+      'Daily_Records': img.get('Daily_Records'),
+      'ERA5_Tmax': stats.get('ERA5_Tmax'),
+      'ERA5_Tmin': stats.get('ERA5_Tmin'),
+      'ERA5_Tmean': stats.get('ERA5_Tmean')
+    });
+  });
+
+  print(stn.name + ' (' + stn.start.slice(0, 7) + ' to ' + stn.end.slice(0, 7) + ') monthly records:', monthlyImages.size());
+
+  var endTag = stn.end.slice(0, 7).replace('-', '');
+
+  Export.table.toDrive({
+    collection: sampledData,
+    description: 'ERA5_LAND_' + stn.name + '_' + stn.start.slice(0, 4) + '_' + endTag,
+    folder: driveFolder,
+    fileFormat: 'CSV',
+    selectors: [
+      'Station', 'AEZ', 'Lat', 'Lon',
+      'Year', 'Month', 'date', 'Daily_Records',
+      'ERA5_Tmax', 'ERA5_Tmin', 'ERA5_Tmean'
+    ]
+  });
+});
+
+// 5. MAP DISPLAY
+Map.setCenter(37.5, 15.3, 7);
